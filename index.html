@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Road Forge — 道路构造关卡编辑器</title>
+    <link rel="stylesheet" href="/src/view/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="view"></canvas>
+
+      <header id="topbar">
+        <div class="brand">
+          <span class="dot"></span>
+          <strong>Road Forge</strong>
+          <span class="sub">道路构造 · 关卡编辑视窗</span>
+        </div>
+        <div class="scene-switch" id="scene-switch"></div>
+        <div class="status" id="status">
+          <span class="pill" id="status-build">—</span>
+          <span class="pill" id="status-turns">—</span>
+          <span class="pill" id="status-viol">—</span>
+        </div>
+      </header>
+
+      <aside id="panel">
+        <section class="card">
+          <h2>场景 / Sample</h2>
+          <div id="scene-desc" class="muted"></div>
+        </section>
+
+        <section class="card">
+          <h2>路线控制点 / Route</h2>
+          <div class="row">
+            <label>连接</label>
+            <select id="conn-select"></select>
+          </div>
+          <div class="row">
+            <label>锁定本段</label>
+            <button id="btn-lock" class="btn small" aria-pressed="false">未锁定</button>
+          </div>
+          <div class="row">
+            <label>车辆</label>
+            <select id="vehicle-select"></select>
+          </div>
+          <div class="hint">
+            拖动绿色控制点改变曲线；白色端点为连接节点。锁定后重新求解其余连接只会保留本段。
+          </div>
+          <div class="row">
+            <button id="btn-solve" class="btn primary">重新求解其余连接</button>
+          </div>
+          <div class="row">
+            <button id="btn-reset" class="btn">重置本场景</button>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>驾驶 / Drive</h2>
+          <div class="row">
+            <button id="btn-drive" class="btn primary">进入驾驶</button>
+            <button id="btn-exit-drive" class="btn" hidden>退出驾驶</button>
+          </div>
+          <div class="row drive-keys" id="drive-keys" hidden>
+            <span><kbd>W</kbd>/<kbd>↑</kbd> 油门</span>
+            <span><kbd>S</kbd>/<kbd>↓</kbd> 刹车</span>
+            <span><kbd>A</kbd><kbd>D</kbd> 转向</span>
+          </div>
+          <div class="row">
+            <label>试驾段</label>
+            <select id="drive-route"></select>
+          </div>
+          <div class="telemetry" id="telemetry"></div>
+        </section>
+
+        <section class="card">
+          <h2>结果 / Results</h2>
+          <div id="routes-list" class="list"></div>
+          <h3>路口与可行转弯</h3>
+          <div id="junctions-list" class="list"></div>
+        </section>
+
+        <section class="card">
+          <h2>违规位置 / Violations</h2>
+          <div id="violations-list" class="list compact"></div>
+        </section>
+
+        <section class="card">
+          <h2>构建记录 / Build record</h2>
+          <div class="record" id="record-box"></div>
+          <button id="btn-copy-record" class="btn small">复制 JSON</button>
+        </section>
+      </aside>
+
+      <div id="toast" class="toast" hidden></div>
+      <div id="loading" class="loading"><span></span> 正在求解道路构造…</div>
+      <div id="pick-hint" class="pick-hint" hidden>点击并拖动绿色控制点</div>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

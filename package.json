@@ -1,0 +1,24 @@
+{
+  "name": "road-forge",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Constraint-driven road construction kernel and level editor",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "test": "node --test test/*.test.js",
+    "e2e": "node e2e/run.js"
+  },
+  "dependencies": {
+    "clipper-lib": "^6.4.2",
+    "delaunator": "^5.1.0",
+    "earcut": "^3.2.4",
+    "three": "^0.187.0"
+  },
+  "devDependencies": {
+    "playwright": "^1.65.1",
+    "vite": "^7.3.8"
+  }
+}
