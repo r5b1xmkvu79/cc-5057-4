@@ -67,6 +67,26 @@ const run = async () => {
     const tele = await page.textContent('#telemetry');
     console.log('telemetry:', (tele || '').replace(/\s+/g, ' ').trim());
     await page.screenshot({ path: '/tmp/drive.png' });
+
+    // While the car is on pavement the drive log names the real surface source
+    // and the edit guard reports the occupied connection.
+    const driveInfo = await page.evaluate(() => {
+      const s = window.__roadforge.status();
+      return { occupied: s.occupied, adopted: s.adoptedSurfaces };
+    });
+    console.log('drive occupied:', JSON.stringify(driveInfo.occupied), 'adopted:', JSON.stringify(driveInfo.adopted));
+    if (!driveInfo.adopted.length) errors.push('drive log recorded no pavement source');
+    if (!driveInfo.occupied.length) errors.push('edit guard saw no occupied connection while driving');
+
+    // A drag on the occupied connection must be refused while driving.
+    const blocked = await page.evaluate((occupied) => {
+      const app = window.__roadforge;
+      const connId = occupied[0] || app.built.routes[0].conn.id;
+      return app.planEdit([connId]);
+    }, driveInfo.occupied);
+    console.log('occupied edit plan:', JSON.stringify(blocked));
+    if (blocked.removable.length) errors.push('occupied connection was offered for removal');
+
     await page.keyboard.press('Escape');
     await page.waitForTimeout(300);
 
@@ -75,6 +95,7 @@ const run = async () => {
       const r = window.__roadforge.built.routes.find((x) => x.conn.id === 'branch-north');
       return r && r.samples.length ? r.samples[r.samples.length - 1].s : null;
     });
+    const revBefore = await page.evaluate(() => window.__roadforge.status().revision);
     const dragged = await page.evaluate(() => {
       const app = window.__roadforge;
       if (!app) return 'no-api';
@@ -89,6 +110,22 @@ const run = async () => {
     console.log('drag result:', JSON.stringify(dragged), 'branch length', beforeLen?.toFixed(1), '->', afterLen?.toFixed(1));
     const afterViol = await page.textContent('#status-viol');
     console.log('after drag status:', afterViol);
+
+    // Revision hand-off: every drag bumps the road revision and the collision
+    // mesh is published for the same revision (never lagging behind the road).
+    const statusAfterDrag = await page.evaluate(() => window.__roadforge.status());
+    console.log('revision', revBefore, '->', statusAfterDrag.revision, 'meshCurrent', statusAfterDrag.meshCurrent);
+    if (!(statusAfterDrag.revision > revBefore)) {
+      errors.push(`revision did not advance: ${revBefore} -> ${statusAfterDrag.revision}`);
+    }
+    if (!statusAfterDrag.meshCurrent) errors.push('collision mesh lags the latest road revision');
+
+    // Edit guard on an open (vehicle-free) scene: every connection is removable.
+    const plan = await page.evaluate(() =>
+      window.__roadforge.planEdit(window.__roadforge.built.routes.map((r) => r.conn.id)),
+    );
+    console.log('open edit plan: removable', plan.removable.length, 'retained', plan.retained.length);
+    if (plan.retained.length !== 0) errors.push('vehicle-free junction should be fully editable');
     await page.screenshot({ path: '/tmp/after-drag.png' });
 
     if (errors.length) {

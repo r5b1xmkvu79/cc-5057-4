@@ -1,9 +1,11 @@
 // Level editor entry point.
-// Owns the project state, rebuilds it through the kernel, and wires the Three.js
-// viewer to the control panel. All geometry and validation come from
-// src/core/build.js; this file only orchestrates and renders.
+// Owns the project state, rebuilds it through the staged road geometry
+// interface, and wires the Three.js viewer to the control panel. All geometry
+// and validation come from the kernel (src/core via geometry-interface.js); this
+// file only orchestrates and renders.
 
-import { buildProject, rebuildWithLocked, interiorControl } from './core/build.js';
+import { rebuildWithLocked, interiorControl } from './core/build.js';
+import { RoadGeometryInterface } from './core/geometry-interface.js';
 import { sampleProject, SAMPLE_IDS } from './project.js';
 import { VEHICLES, vehicleById, ROAD_CLASSES } from './core/standards.js';
 import { RoadView } from './view/scene.js';
@@ -17,6 +19,7 @@ const SCENE_LABELS = {
 const state = {
   sceneId: 'arterial',
   project: null,
+  iface: null,
   built: null,
   selectedConnection: null,
   drive: {
@@ -27,6 +30,13 @@ const state = {
   dragging: null,
   selectedTurn: null,
 };
+
+// Geometry exceptions raised by the kernel are surfaced through the editor UI,
+// never swallowed or reported as a pass.
+function geometryError(err) {
+  console.error(err);
+  toast(`道路几何异常: ${err.message}`, 'error');
+}
 
 const view = new RoadView();
 const canvas = document.getElementById('view');
@@ -130,6 +140,10 @@ function loadScene(id) {
   state.drive.routeId = null;
   exitDrive();
   ui.vehicleSelect.value = state.project.vehicleId || 'sedan';
+  // A fresh scene gets a fresh geometry interface (and therefore a fresh
+  // revision ledger and drive log).
+  state.iface = new RoadGeometryInterface(state.project);
+  state.built = state.iface.built;
   rebuild();
 }
 
@@ -138,8 +152,11 @@ function rebuild() {
   // Yield a frame so the loading indicator paints before the synchronous kernel.
   requestAnimationFrame(() => {
     try {
-      state.built = buildProject(state.project);
+      state.built = state.iface.rebuild(state.project);
       state.built.vehicleId = state.project.vehicleId;
+      // Driving recorded on an older road revision is now stale; the log keeps
+      // it for inspection but it can no longer take effect.
+      state.iface.syncDriveLog();
       renderSceneGeometry();
       renderLists();
       renderStatus();
@@ -153,8 +170,7 @@ function rebuild() {
         state.hasFramed = { ...(state.hasFramed || {}), [state.sceneId]: true };
       }
     } catch (err) {
-      console.error(err);
-      toast(`求解失败: ${err.message}`, 'error');
+      geometryError(err);
     } finally {
       showLoading(false);
     }
@@ -175,8 +191,10 @@ function resolveRest() {
       const conn = state.project.connections.find((c) => c.id === id);
       conn.controlPoints = interior;
       conn.locked = true;
-      state.built = next;
+      // Re-enter through the staged interface so the revision ledger advances.
+      state.built = state.iface.rebuild(state.project);
       state.built.vehicleId = state.project.vehicleId;
+      state.iface.syncDriveLog();
       renderSceneGeometry();
       renderLists();
       renderStatus();
@@ -184,8 +202,7 @@ function resolveRest() {
       renderLockButton();
       toast(`已锁定 ${route.conn.name || id}，其余连接重新求解`, 'ok');
     } catch (err) {
-      console.error(err);
-      toast(`重新求解失败: ${err.message}`, 'error');
+      geometryError(err);
     } finally {
       showLoading(false);
     }
@@ -403,7 +420,11 @@ function armName(built, id) {
 
 function renderRecord() {
   const rec = state.built.record;
+  const adopted = state.iface ? state.iface.adoptedSurfaces({ includeStale: true }) : [];
   const summary = {
+    graphId: rec.graphId,
+    revision: rec.revision,
+    meshRevision: state.iface ? state.iface.meshRevision : null,
     seed: rec.seed,
     vehicle: rec.vehicleId,
     controls: rec.controls,
@@ -411,6 +432,9 @@ function renderRecord() {
     junctions: rec.junctions.length,
     turns: rec.turns.map((t) => ({ j: t.junctionId, from: t.from, to: t.to, pass: t.pass })),
     locked: rec.connections.filter((c) => c.locked).map((c) => c.id),
+    adoptedSurfaces: adopted.map((s) =>
+      s.part === 'junction' ? `路口:${s.junctionId}@r${s.revision}` : `路面:${s.connectionId}@r${s.revision}`,
+    ),
   };
   ui.recordBox.textContent = JSON.stringify(summary, null, 1);
 }
@@ -462,6 +486,12 @@ function enterDrive() {
   view.addVehicle(state.built, state.project.vehicleId);
   const placed = view.placeVehicle(route, state.built);
   state.drive.startRoute = route;
+  // Register a safe parking point well back from any junction, on this route's
+  // own pavement, so an edit can offer an explicit safe-return instead of
+  // tearing out pavement under the wheels.
+  const safeSample = route.samples[Math.max(1, Math.floor(route.samples.length * 0.12))];
+  state.iface.registerSafePoint(route.conn.id, { x: safeSample.x, y: safeSample.y });
+  state.iface.startDriveSession(route.conn.id, { x: placed.station, y: 0 });
   // Chase camera.
   const v = view.vehicle;
   chaseCamera(v);
@@ -469,6 +499,7 @@ function enterDrive() {
 }
 
 function exitDrive() {
+  if (state.iface && state.drive.active) state.iface.endDriveSession();
   state.drive.active = false;
   view.controls.enabled = true;
   view.removeVehicle();
@@ -535,6 +566,21 @@ function driveTick(t) {
   const input = readInput();
   view.stepVehicle(dt, input, state.built);
   const v = view.vehicle;
+  // Record the actual pavement under the wheels (resolved by the geometry
+  // interface) and feed contact into the edit guard. Stale-revision frames are
+  // kept but flagged; only current-revision driving stays active.
+  const frame = state.iface.recordDriveFrame({
+    x: v.plan.x,
+    y: v.plan.y,
+    heading: v.heading,
+    speed: v.speed,
+    time: t,
+  });
+  if (frame.surface) {
+    const touched = [];
+    if (frame.surface.connectionId) touched.push(frame.surface.connectionId);
+    state.iface.guard.markContact(touched, v.plan);
+  }
   // Camera follows smoothly.
   const cam = view.camera.position;
   const targetX = v.plan.x - Math.cos(v.heading) * 15;
@@ -548,12 +594,21 @@ function driveTick(t) {
 }
 
 function renderTelemetry(v) {
-  const h = view.samplePavement(state.built, v.plan.x, v.plan.y);
+  const probe = state.iface.surfaceAt(v.plan.x, v.plan.y);
+  const h = probe ? probe.height : view.samplePavement(state.built, v.plan.x, v.plan.y);
+  const sourceLabel = probe
+    ? probe.source.part === 'junction'
+      ? `路口 ${probe.source.junctionId}`
+      : `路面 ${probe.source.connectionId}`
+    : '路外';
+  const stale = probe && probe.revision !== state.iface.revision;
   ui.telemetry.innerHTML = `
     <span>车速 <b>${(v.speed * 3.6).toFixed(0)} km/h</b></span>
     <span>路面高 <b>${h != null ? h.toFixed(2) : '—'} m</b></span>
+    <span>实际路面 <b>${sourceLabel}</b></span>
     <span>坐标 <b>${v.plan.x.toFixed(0)}, ${v.plan.y.toFixed(0)}</b></span>
-    <span>转向 <b>${(v.steering * 180 / Math.PI).toFixed(0)}°</b></span>`;
+    <span>转向 <b>${(v.steering * 180 / Math.PI).toFixed(0)}°</b></span>
+    ${stale ? '<span class="warn">该轨迹已被新道路修订取代</span>' : ''}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -573,10 +628,31 @@ function bindPointer() {
       return;
     }
     e.preventDefault();
+    const connectionId = handle.userData.connectionId;
+    // Live-edit safety: while driving, a connection with tyre contact is
+    // retained. The editor blocks the drag and offers an explicit safe return
+    // instead of removing pavement under the vehicle.
+    if (state.drive.active) {
+      const decision = state.iface.guard.canRemove(connectionId);
+      if (decision.status !== 'free') {
+        if (decision.status === 'parked') {
+          const point = state.iface.requestSafeReturn(connectionId);
+          if (point) {
+            view.vehicle.plan = { x: point.x, y: point.y };
+            view.syncVehicle(state.built);
+            state.iface.confirmSafeReturn(connectionId);
+            toast('车辆已送回安全停车点，现在可以编辑该连接', 'ok');
+          }
+        } else {
+          toast('该连接仍有轮胎接触，请待车辆通过或先退出驾驶', 'error');
+        }
+        return;
+      }
+    }
     view.controls.enabled = false;
     const p = handle.position;
     state.dragging = {
-      connectionId: handle.userData.connectionId,
+      connectionId,
       index: handle.userData.index,
       handle,
       planeY: p.y,
@@ -659,17 +735,27 @@ window.__roadforge = {
   get state() { return state; },
   get built() { return state.built; },
   get view() { return view; },
+  get iface() { return state.iface; },
   status() {
     const b = state.built;
     return {
       sceneId: state.sceneId,
+      revision: b.revision,
+      meshRevision: state.iface.meshRevision,
+      meshCurrent: state.iface.ledger.meshIsCurrent(),
       errorCount: b.errorCount,
       turns: b.turnTests.length,
       turnFails: b.turnTests.filter((t) => !t.pass).length,
       violations: b.violations.length,
       seams: b.seams.length,
+      occupied: state.iface.guard.occupiedConnections(),
+      adoptedSurfaces: state.iface.adoptedSurfaces({ includeStale: true }),
       controls: state.project.connections.map((c) => ({ id: c.id, locked: !!c.locked, controlPoints: c.controlPoints })),
     };
+  },
+  // Plan an edit against the guard without mutating geometry.
+  planEdit(connectionIds) {
+    return state.iface.planEdit(connectionIds);
   },
   // Move the first interior control point of the selected connection.
   debugDragControl(index = 0, dx = 0, dy = 0) {
@@ -684,7 +770,7 @@ window.__roadforge = {
     conn.controlPoints[index] = { x: before.x + dx, y: before.y + dy };
     conn.locked = false;
     rebuild();
-    return { id, index, before, after: conn.controlPoints[index] };
+    return { id, index, before, after: conn.controlPoints[index], revision: state.iface.revision };
   },
 };
 
